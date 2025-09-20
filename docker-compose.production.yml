@@ -1,0 +1,137 @@
+version: '3.8'
+
+services:
+  # MySQL Database (production)
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis for Celery
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+  # Flask Backend API (Production)
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile.production
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+      - TRIPAY_API_KEY=${TRIPAY_API_KEY}
+      - TRIPAY_MERCHANT_CODE=${TRIPAY_MERCHANT_CODE}
+      - TRIPAY_PRIVATE_KEY=${TRIPAY_PRIVATE_KEY}
+      - TRIPAY_IS_PRODUCTION=true
+      - TRIPAY_CALLBACK_URL=${TRIPAY_CALLBACK_URL}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - CHATGPT_ADMIN_EMAIL=${CHATGPT_ADMIN_EMAIL}
+      - CHATGPT_ADMIN_PASSWORD=${CHATGPT_ADMIN_PASSWORD}
+      - EMAIL_ENABLED=true
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY}
+      - FROM_EMAIL=${FROM_EMAIL}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ENABLE_CELERY=true
+      - SELENIUM_HEADLESS=true
+    volumes:
+      - backend_screenshots:/app/screenshots
+      - backend_logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+
+  # Celery Worker (Production)
+  celery-worker:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile.production
+    command: celery -A celery_worker.celery worker --loglevel=info --concurrency=2 --max-tasks-per-child=1000
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+      - CHATGPT_ADMIN_EMAIL=${CHATGPT_ADMIN_EMAIL}
+      - CHATGPT_ADMIN_PASSWORD=${CHATGPT_ADMIN_PASSWORD}
+      - EMAIL_ENABLED=true
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY}
+      - FROM_EMAIL=${FROM_EMAIL}
+      - SELENIUM_HEADLESS=true
+    volumes:
+      - backend_screenshots:/app/screenshots
+      - backend_logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data:
+  backend_screenshots:
+  backend_logs:
+  nginx_logs:
